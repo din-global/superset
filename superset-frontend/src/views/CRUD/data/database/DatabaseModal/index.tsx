@@ -132,19 +132,19 @@ interface DatabaseModalProps {
 }
 
 export enum ActionType {
+  addTableCatalogSheet,
   configMethodChange,
   dbSelected,
   editorChange,
+  extraEditorChange,
+  extraInputChange,
   fetched,
   inputChange,
   parametersChange,
+  queryChange,
+  removeTableCatalogSheet,
   reset,
   textChange,
-  extraInputChange,
-  extraEditorChange,
-  addTableCatalogSheet,
-  removeTableCatalogSheet,
-  queryChange,
 }
 
 interface DBReducerPayloadType {
@@ -179,6 +179,7 @@ export type DBReducerActionType =
         engine?: string;
         configuration_method: CONFIGURATION_METHOD;
         engine_information?: {};
+        driver?: string;
       };
     }
   | {
@@ -251,6 +252,19 @@ export function dbReducer(
             schemas_allowed_for_file_upload: (action.payload.value || '')
               .split(',')
               .filter(schema => schema !== ''),
+          }),
+        };
+      }
+      if (action.payload.name === 'http_path') {
+        return {
+          ...trimmedState,
+          extra: JSON.stringify({
+            ...extraJson,
+            engine_params: {
+              connect_args: {
+                [action.payload.name]: action.payload.value?.trim(),
+              },
+            },
           }),
         };
       }
@@ -578,10 +592,17 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
           },
         });
       }
+
+      // make sure that button spinner animates
+      setLoading(true);
       const errors = await getValidation(dbToUpdate, true);
       if ((validationErrors && !isEmpty(validationErrors)) || errors) {
+        setLoading(false);
         return;
       }
+      setLoading(false);
+      // end spinner animation
+
       const parameters_schema = isEditMode
         ? dbToUpdate.parameters_schema?.properties
         : dbModel?.parameters.properties;
@@ -722,7 +743,8 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
       const selectedDbModel = availableDbs?.databases.filter(
         (db: DatabaseObject) => db.name === database_name,
       )[0];
-      const { engine, parameters, engine_information } = selectedDbModel;
+      const { engine, parameters, engine_information, default_driver } =
+        selectedDbModel;
       const isDynamic = parameters !== undefined;
       setDB({
         type: ActionType.dbSelected,
@@ -733,6 +755,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
             ? CONFIGURATION_METHOD.DYNAMIC_FORM
             : CONFIGURATION_METHOD.SQLALCHEMY_URI,
           engine_information,
+          driver: default_driver,
         },
       });
 
@@ -873,6 +896,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
               key="submit"
               buttonStyle="primary"
               onClick={onSave}
+              loading={isLoading}
             >
               {t('Connect')}
             </StyledFooterButton>
@@ -890,6 +914,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
             buttonStyle="primary"
             onClick={onSave}
             data-test="modal-confirm-button"
+            loading={isLoading}
           >
             {t('Finish')}
           </StyledFooterButton>
@@ -909,6 +934,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
             buttonStyle="primary"
             onClick={onSave}
             disabled={handleDisableOnImport()}
+            loading={isLoading}
           >
             {t('Connect')}
           </StyledFooterButton>
@@ -929,6 +955,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
         buttonStyle="primary"
         onClick={onSave}
         disabled={db?.is_managed_externally}
+        loading={isLoading}
         tooltip={
           db?.is_managed_externally
             ? t(
@@ -966,8 +993,8 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
   useEffect(() => {
     if (show) {
       setTabKey(DEFAULT_TAB_KEY);
-      getAvailableDbs();
       setLoading(true);
+      getAvailableDbs();
     }
     if (databaseId && show) {
       fetchDB();
@@ -1156,23 +1183,26 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
           : typeof dbErrors === 'string'
           ? [dbErrors]
           : [];
-    } else if (!isEmpty(validationErrors)) {
-      alertErrors =
-        validationErrors?.error_type === 'GENERIC_DB_ENGINE_ERROR'
-          ? [
-              'We are unable to connect to your database. Click "See more" for database-provided information that may help troubleshoot the issue.',
-            ]
-          : [];
+    } else if (
+      !isEmpty(validationErrors) &&
+      validationErrors?.error_type === 'GENERIC_DB_ENGINE_ERROR'
+    ) {
+      alertErrors = [
+        validationErrors?.description || validationErrors?.message,
+      ];
     }
-
     if (alertErrors.length) {
       return (
-        <ErrorMessageWithStackTrace
-          title={t('Database Creation Error')}
-          description={alertErrors[0]}
-          subtitle={validationErrors?.description}
-          copyText={validationErrors?.description}
-        />
+        <ErrorAlertContainer>
+          <ErrorMessageWithStackTrace
+            title={t('Database Creation Error')}
+            description={t(
+              'We are unable to connect to your database. Click "See more" for database-provided information that may help troubleshoot the issue.',
+            )}
+            subtitle={alertErrors?.[0] || validationErrors?.description}
+            copyText={validationErrors?.description}
+          />
+        </ErrorAlertContainer>
       );
     }
     return <></>;
@@ -1259,6 +1289,12 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
             type: target.type,
             name: target.name,
             checked: target.checked,
+            value: target.value,
+          })
+        }
+        onExtraInputChange={({ target }: { target: HTMLInputElement }) =>
+          onChange(ActionType.extraInputChange, {
+            name: target.name,
             value: target.value,
           })
         }
@@ -1427,6 +1463,12 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
                   value: target.value,
                 })
               }
+              onExtraInputChange={({ target }: { target: HTMLInputElement }) =>
+                onChange(ActionType.extraInputChange, {
+                  name: target.name,
+                  value: target.value,
+                })
+              }
               onChange={({ target }: { target: HTMLInputElement }) =>
                 onChange(ActionType.textChange, {
                   name: target.name,
@@ -1479,6 +1521,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
               />
             </StyledAlertMargin>
           )}
+          {showDBError && errorAlert()}
         </Tabs.TabPane>
         <Tabs.TabPane tab={<span>{t('Advanced')}</span>} key="2">
           <ExtraOptions
@@ -1512,9 +1555,6 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
               onChange(ActionType.extraEditorChange, payload);
             }}
           />
-          {showDBError && (
-            <ErrorAlertContainer>{errorAlert()}</ErrorAlertContainer>
-          )}
         </Tabs.TabPane>
       </TabsStyled>
     </Modal>
@@ -1615,6 +1655,16 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
                       value: target.value,
                     })
                   }
+                  onExtraInputChange={({
+                    target,
+                  }: {
+                    target: HTMLInputElement;
+                  }) =>
+                    onChange(ActionType.extraInputChange, {
+                      name: target.name,
+                      value: target.value,
+                    })
+                  }
                   onRemoveTableCatalog={(idx: number) => {
                     setDB({
                       type: ActionType.removeTableCatalogSheet,
@@ -1676,9 +1726,7 @@ const DatabaseModal: FunctionComponent<DatabaseModalProps> = ({
                   )}
                 </div>
                 {/* Step 2 */}
-                {showDBError && (
-                  <ErrorAlertContainer>{errorAlert()}</ErrorAlertContainer>
-                )}
+                {showDBError && errorAlert()}
               </>
             ))}
         </>

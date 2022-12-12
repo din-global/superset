@@ -190,6 +190,12 @@ class DatasourceType(str, Enum):
     VIEW = "view"
 
 
+class LoggerLevel(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    EXCEPTION = "exception"
+
+
 class HeaderDataType(TypedDict):
     notification_format: str
     owners: List[int]
@@ -556,9 +562,16 @@ def format_timedelta(time_delta: timedelta) -> str:
     return str(time_delta)
 
 
-def base_json_conv(  # pylint: disable=inconsistent-return-statements
-    obj: Any,
-) -> Any:
+def base_json_conv(obj: Any) -> Any:
+    """
+    Tries to convert additional types to JSON compatible forms.
+
+    :param obj: The serializable object
+    :returns: The JSON compatible form
+    :raises TypeError: If the object cannot be serialized
+    :see: https://docs.python.org/3/library/json.html#encoders-and-decoders
+    """
+
     if isinstance(obj, memoryview):
         obj = obj.tobytes()
     if isinstance(obj, np.int64):
@@ -581,47 +594,60 @@ def base_json_conv(  # pylint: disable=inconsistent-return-statements
         except Exception:  # pylint: disable=broad-except
             return "[bytes]"
 
+    raise TypeError(f"Unserializable object {obj} of type {type(obj)}")
 
-def json_iso_dttm_ser(obj: Any, pessimistic: bool = False) -> str:
-    """
-    json serializer that deals with dates
 
-    >>> dttm = datetime(1970, 1, 1)
-    >>> json.dumps({'dttm': dttm}, default=json_iso_dttm_ser)
-    '{"dttm": "1970-01-01T00:00:00"}'
+def json_iso_dttm_ser(obj: Any, pessimistic: bool = False) -> Any:
     """
-    val = base_json_conv(obj)
-    if val is not None:
-        return val
+    A JSON serializer that deals with dates by serializing them to ISO 8601.
+
+        >>> json.dumps({'dttm': datetime(1970, 1, 1)}, default=json_iso_dttm_ser)
+        '{"dttm": "1970-01-01T00:00:00"}'
+
+    :param obj: The serializable object
+    :param pessimistic: Whether to be pessimistic regarding serialization
+    :returns: The JSON compatible form
+    :raises TypeError: If the non-pessimistic object cannot be serialized
+    """
+
     if isinstance(obj, (datetime, date, pd.Timestamp)):
-        obj = obj.isoformat()
-    else:
+        return obj.isoformat()
+
+    try:
+        return base_json_conv(obj)
+    except TypeError as ex:
         if pessimistic:
-            return "Unserializable [{}]".format(type(obj))
+            return f"Unserializable [{type(obj)}]"
 
-        raise TypeError("Unserializable object {} of type {}".format(obj, type(obj)))
-    return obj
+        raise ex
 
 
-def pessimistic_json_iso_dttm_ser(obj: Any) -> str:
+def pessimistic_json_iso_dttm_ser(obj: Any) -> Any:
     """Proxy to call json_iso_dttm_ser in a pessimistic way
 
     If one of object is not serializable to json, it will still succeed"""
     return json_iso_dttm_ser(obj, pessimistic=True)
 
 
-def json_int_dttm_ser(obj: Any) -> float:
-    """json serializer that deals with dates"""
-    val = base_json_conv(obj)
-    if val is not None:
-        return val
+def json_int_dttm_ser(obj: Any) -> Any:
+    """
+    A JSON serializer that deals with dates by serializing them to EPOCH.
+
+        >>> json.dumps({'dttm': datetime(1970, 1, 1)}, default=json_int_dttm_ser)
+        '{"dttm": 0.0}'
+
+    :param obj: The serializable object
+    :returns: The JSON compatible form
+    :raises TypeError: If the object cannot be serialized
+    """
+
     if isinstance(obj, (datetime, pd.Timestamp)):
-        obj = datetime_to_epoch(obj)
-    elif isinstance(obj, date):
-        obj = (obj - EPOCH.date()).total_seconds() * 1000
-    else:
-        raise TypeError("Unserializable object {} of type {}".format(obj, type(obj)))
-    return obj
+        return datetime_to_epoch(obj)
+
+    if isinstance(obj, date):
+        return (obj - EPOCH.date()).total_seconds() * 1000
+
+    return base_json_conv(obj)
 
 
 def json_dumps_w_dates(payload: Dict[Any, Any], sort_keys: bool = False) -> str:
@@ -1156,8 +1182,7 @@ def merge_extra_filters(form_data: Dict[str, Any]) -> None:
     # that are external to the slice definition. We use those for dynamic
     # interactive filters like the ones emitted by the "Filter Box" visualization.
     # Note extra_filters only support simple filters.
-    applied_time_extras: Dict[str, str] = {}
-    form_data["applied_time_extras"] = applied_time_extras
+    form_data.setdefault("applied_time_extras", {})
     adhoc_filters = form_data.get("adhoc_filters", [])
     form_data["adhoc_filters"] = adhoc_filters
     merge_extra_form_data(form_data)
@@ -1200,7 +1225,7 @@ def merge_extra_filters(form_data: Dict[str, Any]) -> None:
                 time_extra_value = filtr.get("val")
                 if time_extra_value and time_extra_value != NO_TIME_RANGE:
                     form_data[time_extra] = time_extra_value
-                    applied_time_extras[filter_column] = time_extra_value
+                    form_data["applied_time_extras"][filter_column] = time_extra_value
             elif filtr["val"]:
                 # Merge column filters
                 filter_key = get_filter_key(filtr)
@@ -1258,8 +1283,8 @@ def get_example_default_schema() -> Optional[str]:
     Return the default schema of the examples database, if any.
     """
     database = get_example_database()
-    engine = database.get_sqla_engine()
-    return inspect(engine).default_schema_name
+    with database.get_sqla_engine_with_context() as engine:
+        return inspect(engine).default_schema_name
 
 
 def backend() -> str:
